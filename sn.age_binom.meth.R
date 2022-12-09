@@ -1,8 +1,8 @@
 rm(list = ls())
 library(runjags)
 library(tidyverse)
-source("../00_misc_funcs.R")
-load("../age_and_methylation_data.rdata")
+#source("00_misc_funcs.R")
+load("age_and_methylation_data.rdata")
 
 #set.seed(1234)
 
@@ -11,7 +11,6 @@ adapt <- 100
 burnin <- 5000000
 total.samples <- 10000
 thin <- 100
-method <- "parallel"
 
 
 # Extract conversion,  methylation,  and coverage matrices ----------------
@@ -67,14 +66,6 @@ site.smry <- cpg %>%
     .groups = "drop"
   ) %>% 
   arrange("loc.site")
-
-plot(sort(site.smry$lo.var), type = "l")
-
-plot(sort(abs(site.smry$age.cor)), type = "l")
-
-plot(sort(site.smry$cov.median), type = "l")
-
-plot(site.smry$cov.median, site.smry$lo.var)
 
 sites.to.keep <- site.smry %>% 
   filter(cov.median >= 1000) %>% 
@@ -161,14 +152,28 @@ post <- run.jags(
   modules = c("glm", "lecuyer"),
   summarise = FALSE,
   jags.refresh = 10,
-  method = method,
+  method = "parallel",
   n.chains = chains,
   adapt = adapt,
   burnin = burnin,
   sample = ceiling(total.samples / chains),
   thin = thin
 )
+end.time <- Sys.time()
 units(post$timetaken) <- "hours"
 
-postSummary(post, c("deviance", "intercept", "b", "pred.age", "dsn"), "sn.age_binom.meth")
+vars <- c("deviance", "intercept", "b", "pred.age", "dsn")
+post.smry <- summary(post, vars = vars)
 
+save(
+  end.time, post, post.smry, fname, 
+  file = format(end.time, "posterior.%y%m%d_%H%M.rdata")
+)
+  
+graphics.off()
+pdf(format(end.time, "plots.%y%m%d_%H%M.pdf"))
+plot(post, vars = vars, plot.type = c("trace", "histogram"))
+dev.off()
+
+View(post.smry)
+post$timetaken

@@ -57,20 +57,3 @@ pctMethSamples <- function(df, n) {
     ) %>% 
     arrange(id, rep)
 }
-
-postSummary <- function(post, vars, label) {
-  units(post$timetaken) <- "hours"
-  end.time <- Sys.time()
-  time.stamp <- format(end.time, "%y%m%d_%H%M")
-  fname <- paste0("posterior.summary_", label, "_", time.stamp, ".rdata")
-  
-  post.smry <- summary(post, vars = vars)
-  save(end.time, post, post.smry, fname, file = fname)
-  
-  graphics.off()
-  pdf(paste0("plots_", label, "_", time.stamp, ".pdf"))
-  plot(post, vars = vars, plot.type = c("trace", "histogram"))
-  dev.off()
-  
-  View(post.smry)
-}
