@@ -1,12 +1,33 @@
+---
+title: "Age Prediction"
+output:   
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  comment = NA,
+  fig.height = 8,
+  fig.width = 8
+)
+
 rm(list = ls())
 library(runjags)
 library(tidyverse)
-load("posterior_sn.age_binom.meth_221122_1057.rdata")
+load("results/posterior_sn.age_binom.meth_221122_1057.rdata")
 
 p <- myFuncs::runjags2list(post)
-
+model.data <- myFuncs::extractModelData(post)
 pr.meth <- t(as.matrix(p$pr.meth))
+```
 
+# Percent Methylation
+```{r include=FALSE}
 pr.meth.arr <- array(
   as.vector(pr.meth),
   dim = c(
@@ -21,8 +42,11 @@ pr.meth.arr <- array(
   )
 )
 
-post.compare <- do.call(rbind, apply(
-  expand.grid(id = rownames(model.data$freq.meth), site = colnames(model.data$freq.meth)), 1,
+meth.compare <- do.call(rbind, apply(
+  expand.grid(
+    id = rownames(model.data$freq.meth), 
+    site = colnames(model.data$freq.meth)
+  ), 1,
   function(x) { 
     id <- x[1]
     site <- x[2]
@@ -32,7 +56,8 @@ post.compare <- do.call(rbind, apply(
     post.x <- pr.meth.arr[id, site, ]
     p.gte <- mean(pbinom(freq.meth, coverage, post.x) >= obs.p)
     data.frame(
-      id = id, loc.site = site, freq.meth = freq.meth, coverage = coverage, obs.p = obs.p, 
+      id = id, loc.site = site, 
+      freq.meth = freq.meth, coverage = coverage, obs.p = obs.p, 
       obs.p.lci = qbinom(0.025, coverage, obs.p) / coverage,
       obs.p.hci = qbinom(0.975, coverage, obs.p) / coverage,
       post.median = median(post.x),
@@ -44,18 +69,19 @@ post.compare <- do.call(rbind, apply(
   simplify = FALSE
 )) %>% 
   left_join(locus.map, by = "loc.site")
+```
 
-save.image("meth compare ws.rdata")
-
-graphics.off()
-pdf("test.pdf", height = 14, width = 14)
-for(df in split(post.compare, post.compare$locus)) {
+```{r, fig.height = 14, fig.width = 14}
+for(df in split(meth.compare, meth.compare$locus)) {
   p <- ggplot(df) +
     geom_segment(
       aes(x = obs.p.lci, xend = obs.p.hci, y = id, yend = id), 
       color = "red", linewidth = 2
     ) +
-    geom_point(aes(x = obs.p, y = id), fill = "white", color = "red", shape = 21, size = 2.5) +
+    geom_point(
+      aes(x = obs.p, y = id), 
+      fill = "white", color = "red", shape = 21, size = 2.5
+    ) +
     geom_segment(
       aes(x = post.lci, xend = post.hci, y = id, yend = id)
     ) +
@@ -70,28 +96,9 @@ for(df in split(post.compare, post.compare$locus)) {
     )
   print(p)
 }
-dev.off()
+```
 
+# Age Prediction
+```{r}
 
-min.cov.by.id <- post.compare %>% 
-  group_by(id) %>% 
-  summarize(min.cov = min(coverage), .groups = "drop") %>% 
-  arrange(min.cov) 
-
-cov.by.id <- post.compare %>% 
-  group_by(id) %>% 
-  summarize(median.cov = median(coverage), .groups = "drop") %>% 
-  arrange(median.cov) 
-
-ids.to.delete <- cov.by.id %>% 
-  filter(median.cov < 1000) %>% 
-  pull("id")
-
-cov.by.site <- post.compare %>% 
-  filter(!id %in% ids.to.delete) %>% 
-  group_by(locus, site) %>% 
-  summarize(median.cov = median(coverage), .groups = "drop") %>% 
-  arrange(median.cov) 
-
-sites.to.delete <- cov.by.site %>% 
-  filter(median.cov < 500)
+```

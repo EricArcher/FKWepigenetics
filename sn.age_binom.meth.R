@@ -1,14 +1,11 @@
 rm(list = ls())
 library(runjags)
 library(tidyverse)
-#source("00_misc_funcs.R")
 load("age_and_methylation_data.rdata")
-
-#set.seed(1234)
 
 chains <- 14
 adapt <- 100
-burnin <- 5000000
+burnin <- 1000000
 total.samples <- 10000
 thin <- 100
 
@@ -75,10 +72,10 @@ sites.to.keep <- site.smry %>%
 
 # Select age data ---------------------------------------------------------
 
-#ids.to.keep <- sample(ids.to.keep, 50)
+ids.to.keep <- sample(ids.to.keep, 1)
 
 ages <- age.df %>% 
-  filter(swfsc.id %in% ids.to.keep & age.confidence == 5) %>% 
+  filter(swfsc.id %in% ids.to.keep) %>%  # & age.confidence == 5) %>% 
   arrange(swfsc.id)
 
 
@@ -87,9 +84,9 @@ ages <- age.df %>%
 model.data <- list(
   num.ind = nrow(ages),
   num.sites = length(sites.to.keep),
-  freq.meth = freq.meth[ages$swfsc.id, sites.to.keep],
-  meth.cov = meth.cov[ages$swfsc.id, sites.to.keep],
-  conversion = conversion[ages$swfsc.id, ],
+  freq.meth = freq.meth[ages$swfsc.id, sites.to.keep, drop = FALSE],
+  meth.cov = meth.cov[ages$swfsc.id, sites.to.keep, drop = FALSE],
+  conversion = conversion[ages$swfsc.id, , drop = FALSE],
   age = ages$age.best,
   age.min = ages$age.min,
   age.max = ages$age.max,
@@ -108,11 +105,16 @@ model.data <- list(
 
 post <- run.jags(
   model = "model {
-    intercept ~ dunif(-100, 500) #dnorm(0, 1 / sqrt(40))
+    intercept ~ dunif(-1e4, 1e8) #dnorm(0, 1 / sqrt(40))
     
     # Model site coefficient
-    for(s in 1:num.sites) {
+    for(s in 1:num.sites) {      
+      # Prior for site inclusion
+      pr.w.site[s] ~ dunif(0, 1)
+      w.site[s] ~ dbern(pr.w.site[s])
+    
       b[s] ~ dnorm(0, 0.02) #1 / sqrt(50))
+      b.prime[s] <- b[s] * w.site[s]
     }
     
     for(i in 1:num.ind) {
@@ -123,11 +125,11 @@ post <- run.jags(
         p.meth[i, s] ~ dunif(0, 1)
         freq.meth[i, s] ~ dbinom(p.meth[i, s], meth.cov[i, s])
         pr.meth.hat[i, s] <- 1 - ((1 - p.meth[i, s]) / p.conv[i])
-        lo.meth[i, s] <- ifelse(pr.meth.hat[i, s] < 0, -1000, logit(pr.meth.hat[i, s]))
+        lo.meth[i, s] <- ifelse(pr.meth.hat[i, s] < 0, -1e5, logit(pr.meth.hat[i, s]))
       }
       
       # Linear model predicting age
-      pred.age[i] <- intercept + inprod(b[], lo.meth[i, ])
+      pred.age[i] <- intercept + inprod(b.prime[], lo.meth[i, ])
       
       # Normal age using predicted age as mode of skew normal
       norm.age[i] <- (pred.age[i] - (age[i] - scale.m0[i])) / scale[i]
@@ -143,7 +145,8 @@ post <- run.jags(
       ones[i] ~ dbern(dsn[i] / const)
     }
   }",
-  monitor = c("deviance", "intercept", "b", "pred.age", "pr.meth.hat", "p.meth", "dsn"), 
+  monitor = c("deviance", "intercept", "b.prime", "pr.w.site", "pred.age", "dsn", 
+              "pr.meth.hat", "p.meth"), 
   data = model.data,
   inits = function() list(
     .RNG.name = "lecuyer::RngStream",
@@ -162,16 +165,16 @@ post <- run.jags(
 end.time <- Sys.time()
 units(post$timetaken) <- "hours"
 
-vars <- c("deviance", "intercept", "b", "pred.age", "dsn")
+vars <- c("deviance", "intercept", "pred.age", "dsn", "pr.w.site", "b.prime")
 post.smry <- summary(post, vars = vars)
 
 save(
-  end.time, post, post.smry, fname, 
-  file = format(end.time, "posterior.%y%m%d_%H%M.rdata")
+  end.time, post, post.smry,
+  file = format(end.time, "%y%m%d_%H%M.posterior.rdata")
 )
   
 graphics.off()
-pdf(format(end.time, "plots.%y%m%d_%H%M.pdf"))
+pdf(format(end.time, "%y%m%d_%H%M.plots.pdf"))
 plot(post, vars = vars, plot.type = c("trace", "histogram"))
 dev.off()
 
