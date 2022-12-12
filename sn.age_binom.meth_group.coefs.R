@@ -5,9 +5,9 @@ load("age_and_methylation_data.rdata")
 
 chains <- 14
 adapt <- 100
-burnin <- 100000
+burnin <- 150000
 total.samples <- 10000
-thin <- 100
+thin <- 10
 
 
 # Extract conversion, methylation, and coverage matrices ----------------
@@ -68,12 +68,36 @@ sites.to.keep <- site.smry %>%
   filter(cov.median >= 1000) %>% 
   pull("loc.site")
 
+locus <- locus.map %>% 
+  select(loc.site, locus.num) %>% 
+  deframe()
+
+
+# Map of groups x loci for coefficient clustering -------------------------
+
+site.group.map <- locus.map %>%
+  filter(loc.site %in% sites.to.keep) %>% 
+  group_by(locus) %>% 
+  mutate(locus.site.num = as.numeric(factor(site))) %>% 
+  ungroup() %>% 
+  select(locus.num, locus.site.num) %>%
+  mutate(present = 1) %>%
+  arrange(locus.site.num, locus.num) %>%
+  pivot_wider(
+    locus.num,
+    names_from = "locus.site.num",
+    values_from = "present",
+    values_fill = 0
+  ) %>%
+  select(-locus.num) %>%
+  as.matrix()
+
 
 # Select age data ---------------------------------------------------------
 
 ages <- age.df %>% 
   filter(swfsc.id %in% ids.to.keep & age.confidence == 5) %>% 
-  #slice_sample(n = 1) %>% 
+  slice_sample(n = 1) %>% 
   arrange(swfsc.id)
 
 
@@ -82,9 +106,13 @@ ages <- age.df %>%
 model.data <- list(
   num.ind = nrow(ages),
   num.sites = length(sites.to.keep),
+  num.loci = length(unique(locus.map$locus.num)),
   freq.meth = freq.meth[ages$swfsc.id, sites.to.keep, drop = FALSE],
   meth.cov = meth.cov[ages$swfsc.id, sites.to.keep, drop = FALSE],
   conversion = conversion[ages$swfsc.id, , drop = FALSE],
+  locus = locus[sites.to.keep],
+  num.groups = ncol(site.group.map),
+  group.prior = site.group.map,
   age = ages$age.best,
   age.min = ages$age.min,
   age.max = ages$age.max,
@@ -105,14 +133,24 @@ post <- run.jags(
   model = "model {
     intercept ~ dunif(-1e8, 1e8)
     
+    for(l in 1:num.loci) {
+      # Prior for probability of site group membership (Curtis and Ghosh 2011)
+      pr.group[l, 1:num.groups] ~ ddirich(group.prior[l, 1:num.groups])
+    
+      # Prior for site group coefficients
+      b[l, 1] <- 0
+      for(g in 2:num.groups) {
+        b[l, g] ~ dnorm(0, 1e-4)
+      }
+    }
+    
     # Model site coefficient
     for(s in 1:num.sites) {      
-      # Prior for site inclusion
-      pr.site[s] ~ dunif(0, 1)
-      w.site[s] ~ dbern(pr.site[s])
+      # Prior for site group membership 
+      b.group[s] ~ dcat(pr.group[locus[s], ])
     
-      b[s] ~ dnorm(0, 0.002)
-      b.prime[s] <- b[s] * w.site[s]
+      # Model site coefficient
+      b.prime[s] <- b[locus[s], b.group[s]]
     }
     
     for(i in 1:num.ind) {
@@ -144,7 +182,7 @@ post <- run.jags(
     }
   }",
   monitor = c(
-    "deviance", "intercept", "b.prime", "pr.site", "pred.age", "dsn", 
+    "deviance", "intercept", "b.prime", "pr.group", "b.group", "pred.age", "dsn", 
     "pr.meth.hat", "p.meth"
   ), 
   data = model.data,
@@ -165,7 +203,7 @@ post <- run.jags(
 end.time <- Sys.time()
 units(post$timetaken) <- "hours"
 
-vars <- c("deviance", "intercept", "pred.age", "dsn", "pr.site", "b.prime")
+vars <- c("deviance", "intercept", "pred.age", "dsn", "b.group", "b.prime")
 post.smry <- summary(post, vars = vars)
 
 save.image(format(end.time, "%y%m%d_%H%M.posterior.rdata"))
