@@ -22,7 +22,7 @@ cr.mapping <- rbind(
 # Load and format age data ------------------------------------------------
 
 crc.data <- readxl::read_xlsx(
-  "../Data/Pseudorca_AgeEstimates_ChosenSamples_lasertagdates_2022JUNv5.xlsx",
+  "data/Pseudorca_AgeEstimates_ChosenSamples_lasertagdates_2022JUNv5.xlsx",
   na = c(NA, "NA", "")
 ) 
 
@@ -94,7 +94,7 @@ age.df <- crc.data[, crc.cols] %>%
 attributes(age.df$date.biopsy)$tzone <- "HST"
 
 # read glgs and compute minimum glg
-glgs <- readxl::read_xlsx("../Data/FKW GLG Age Results_KMR.xlsx") %>% 
+glgs <- readxl::read_xlsx("data/FKW GLG Age Results_KMR.xlsx") %>% 
   setNames(c("biopsy.id", "kmr", "min.kmr", "sjc", "crc", "notes"))
 glgs$min.glgs <- sapply(1:nrow(glgs), function(i) {
   x <- min(glgs$kmr[i], glgs$min.kmr[i], glgs$sjc[i], glgs$crc[i], na.rm = T)
@@ -115,57 +115,16 @@ age.sn.optim <- mclapply(1:nrow(age.df), function(i) {
     p = 0.975,
     shape.const = 4
   )
-}, mc.cores = 8)
+}, mc.cores = 14)
 age.sn.params <- t(sapply(age.sn.optim, function(x) x$par))
 colnames(age.sn.params) <- c("sn.location", "sn.scale", "sn.shape")
 age.df <- cbind(age.df, age.sn.params)
 
 
-# Pairwise Probabilities --------------------------------------------------
-
-pws <- t(combn(1:nrow(age.df), 2, function(i) {
-  i1 <- i[1]
-  i2 <- i[2]
-  
-  days.diff <- if(!is.na(age.df$pair.id[i1]) & !is.na(age.df$pair.id[i2])) {
-    if(age.df$pair.id[i1] == age.df$pair.id[i2]) {
-      difftime(age.df$date.biopsy[i1], age.df$date.biopsy[i2], units = "days")
-    } else NA
-  } else NA
-  pr.days.gt <- as.numeric(days.diff > 0)
-  
-  pr.range.gt <- NA
-  if(age.df$age.min[i1] > age.df$age.max[i2]) {
-    pr.range.gt <- 1 
-  } else if(age.df$age.min[i2] > age.df$age.max[i1]) pr.range.gt <- 0
-  
-  pr.age.gt <- mean(
-    rsn(10000, dp = unlist(age.df[i1, c("sn.location", "sn.scale", "sn.shape")])) >
-      rsn(10000, dp = unlist(age.df[i2, c("sn.location", "sn.scale", "sn.shape")]))
-  )
-  
-  pr.older <- if(!is.na(pr.days.gt)) {
-    pr.days.gt
-  } else if(!is.na(pr.range.gt)) {
-    pr.range.gt
-  } else pr.age.gt
-  
-  c(i1, i2, pr.days.gt, pr.range.gt, pr.age.gt, pr.older)
-})) %>% 
-  as.data.frame() %>% 
-  setNames(c(
-    "id1", "id2", "pr.days.gt", "pr.range.gt", "pr.age.gt", "pr.older"
-  )) %>% 
-  mutate(
-    id1 = age.df$swfsc.id[id1],
-    id2 = age.df$swfsc.id[id2]
-  )
-
-
 # Load and format methylation data ----------------------------------------
 
-load("../Data/Pcra.epi.data.for.Eric.Rdata")
-load("../Data/res.sum.Rdata")
+load("data/Pcra.epi.data.for.Eric.Rdata")
+load("data/res.sum.Rdata")
 
 epi.df <- do.call(
   rbind,
@@ -193,7 +152,7 @@ epi.df <- do.call(
 ) %>%   
   mutate(
     site = as.numeric(site),
-    loc.site = paste0(locus, "_", site),
+    loc.site = paste0(locus, "_", zero.pad(site)),
     id.site = paste0(id, "_", loc.site),
     corrected.cov = coverage - errors,
     pct.meth = freq.meth / corrected.cov,
@@ -246,11 +205,58 @@ cpg <- epi.df %>%
   )
 
 
+# Minimum Pr(methylation) Bayesian model ----------------------------------
+
+meth.cov <- cpg %>% 
+  select(id, loc.site, corrected.cov) %>% 
+  pivot_wider(names_from = loc.site, values_from = corrected.cov) %>% 
+  column_to_rownames("id") %>% 
+  as.matrix()
+
+sites.to.keep <- apply(meth.cov, 2, function(x) !any(is.na(x)))
+meth.cov <- meth.cov[, sites.to.keep]
+
+post <- run.jags(
+  model = "model {
+    for(i in 1:num.ind) {
+      for(s in 1:num.sites) {
+        p.meth[i, s] ~ dunif(0, 1)
+        zeroes[i, s] ~ dbinom(p.meth[i, s], meth.cov[i, s])
+      }
+    }
+  }",
+  monitor = c("deviance", "p.meth"), 
+  data = list(
+    num.ind = nrow(meth.cov),
+    num.sites = ncol(meth.cov),
+    meth.cov = meth.cov,
+    zeroes = matrix(0, nrow = nrow(meth.cov), ncol = ncol(meth.cov))
+  ),
+  inits = function() list(
+    .RNG.name = "lecuyer::RngStream",
+    .RNG.seed = sample(1:9999, 1)
+  ),
+  modules = c("glm", "lecuyer"),
+  summarise = FALSE,
+  jags.refresh = 10,
+  method = "parallel",
+  n.chains = 10,
+  adapt = 100,
+  burnin = 10000,
+  sample = 1000,
+  thin = 10
+)
+save(post, file = "results/min.pr.meth.posterior.rdata")
+
+p <- myFuncs::runjags2list(post)
+dimnames(p$p.meth)[1:2] <- list(rownames(meth.cov), colnames(meth.cov))
+median.p <- apply(p$p.meth, 1:2, median)
+
+
 # Save data ---------------------------------------------------------------
 
 save(
-  age.df, age.class.map, 
-  epi.df, locus.map, cpg, non.cpg,
+  age.df, age.class.map, epi.df, locus.map, cpg, non.cpg, median.p,
   file = "age_and_methylation_data.rdata"
 )
 
@@ -258,7 +264,7 @@ save(
 # Plot age distributions --------------------------------------------------
 
 graphics.off()
-pdf(paste0("plots - estimated age priors.pdf"), height = 12, width = 12)
+pdf(paste0("results/plots - estimated age priors.pdf"), height = 12, width = 12)
 
 p <- age.df %>% 
   mutate(
@@ -345,7 +351,7 @@ ids.by.age <- age.df %>%
   rev()
 
 graphics.off()
-pdf("plots - locus posteriors.pdf", width = 30, height = 20)
+pdf("results/plots - locus posteriors.pdf", width = 30, height = 20)
 for(loc in split(smry, smry$locus)) {
   for(i in 1:2) {
     if(i == 2) loc <- mutate(loc, id = factor(id, levels = ids.by.age))

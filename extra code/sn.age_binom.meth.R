@@ -103,7 +103,7 @@ model.data <- list(
 
 post <- run.jags(
   model = "model {
-    intercept ~ dunif(-1e8, 1e8)
+    intercept ~ dnorm(0, 1e-5)
     
     # Model site coefficient
     for(s in 1:num.sites) {      
