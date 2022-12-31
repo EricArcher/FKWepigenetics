@@ -5,8 +5,8 @@ load("age_and_methylation_data.rdata")
 
 chains <- 14
 adapt <- 100
-burnin <- 10000
-total.samples <- 1000
+burnin <- 1000
+total.samples <- 10000
 thin <- 100
 
 
@@ -73,32 +73,13 @@ locus <- locus.map %>%
   deframe()
 
 
-# Prior for groups x loci for coefficient clustering ----------------------
-
-group.prior <- locus.map %>%
-  filter(loc.site %in% sites.to.keep) %>% 
-  group_by(locus) %>% 
-  mutate(locus.site.num = as.numeric(factor(site))) %>% 
-  ungroup() %>% 
-  select(locus.num, locus.site.num) %>%
-  mutate(present = 1) %>%
-  arrange(locus.site.num, locus.num) %>%
-  pivot_wider(
-    locus.num,
-    names_from = "locus.site.num",
-    values_from = "present",
-    values_fill = 0
-  ) %>%
-  select(-locus.num) %>%
-  as.matrix()
-
-
 # Select age data ---------------------------------------------------------
 
 ages <- age.df %>% 
-  filter(swfsc.id %in% ids.to.keep & age.confidence >= 4) %>% 
+  filter(swfsc.id %in% ids.to.keep & age.confidence >= 1) %>% 
   #slice_sample(n = 1) %>% 
   arrange(swfsc.id)
+
 
 # Create model data list --------------------------------------------------
 
@@ -110,8 +91,6 @@ model.data <- list(
   meth.cov = meth.cov[ages$swfsc.id, sites.to.keep, drop = FALSE],
   conversion = conversion[ages$swfsc.id, , drop = FALSE],
   locus = locus[sites.to.keep],
-  num.groups = ncol(group.prior),
-  group.prior = group.prior,
   age = ages$age.best,
   age.min = ages$age.min,
   age.max = ages$age.max,
@@ -123,7 +102,7 @@ model.data <- list(
     sn::dsn(swfscMisc::sn.mode(sn.pars), dp = sn.pars)
   })),
   ones = rep(1, nrow(ages)),
-  zero.lo.meth = median.p[ages$swfsc.id, sites.to.keep]
+  zeroes = matrix(0, nrow = nrow(meth.cov), ncol = ncol(meth.cov))
 )
 
 
@@ -131,28 +110,16 @@ model.data <- list(
 
 post <- run.jags(
   model = "model {
-    intercept ~ dunif(-100, 500)
+    intercept ~ dnorm(0, 1e-3)
     
-    for(l in 1:num.loci) {
-      # Prior for probability of site group membership (Curtis and Ghosh 2011)
-      pr.group[l, 1:num.groups] ~ ddirich(group.prior[l, 1:num.groups])
-      
-      # First group coefficient is always 0 (toggles site off)
-      b.group[l, 1] <- 0
-      
-      # Prior for site group coefficients
-      for(g in 2:num.groups) {
-        b.group[l, g] ~ dnorm(0, 3e-3)
-      }
-    }
+    for(s in 1:num.sites) {    
+      # Prior for site inclusion
+      pr.site[s] ~ dunif(0, 1)
+      w.site[s] ~ dbern(pr.site[s])
     
-    # Model site coefficient
-    for(s in 1:num.sites) {      
-      # Prior for site group membership
-      group[s] ~ dcat(pr.group[locus[s], ])
-    
-      # Model site coefficient (column 2)
-      b.site[s] <- b.group[locus[s], group[s]]
+      # Model site coefficient
+      b[s] ~ dnorm(0, 0.002)
+      b.prime[s] <- b[s] * w.site[s]
     }
     
     for(i in 1:num.ind) {
@@ -161,17 +128,25 @@ post <- run.jags(
       conversion[i, 1] ~ dbinom(p.conv[i], conversion[i, 2])
       
       for(s in 1:num.sites) {
+        # Probability of minimum amount of methylation (0 reads)
+        p.min.meth[i, s] ~ dunif(0, 1 / meth.cov[i, s])
+        zeroes[i, s] ~ dbinom(p.min.meth[i, s], meth.cov[i, s])
+      
         # Probability of observed methylation
         obs.p.meth[i, s] ~ dunif(0, 1)
         freq.meth[i, s] ~ dbinom(obs.p.meth[i, s], meth.cov[i, s])
         
         # Probability of actual methylation
         p.meth[i, s] <- 1 - ((1 - obs.p.meth[i, s]) / p.conv[i])
-        lo.meth[i, s] <- ifelse(p.meth[i, s] <= 0, zero.lo.meth[i, s], logit(p.meth[i, s]))
+        lo.meth[i, s] <- ifelse(
+          p.meth[i, s] <= 0, 
+          logit(p.min.meth[i, s]), 
+          logit(p.meth[i, s])
+        )
       }
       
       # Linear model predicting age
-      pred.age[i] <- intercept + inprod(b.site[], lo.meth[i, ])
+      pred.age[i] <- intercept + inprod(b.prime[], lo.meth[i, ])
       
       # Normal age using predicted age as mode of skew normal
       norm.age[i] <- (pred.age[i] - (age[i] - scale.m0[i])) / scale[i]
@@ -188,8 +163,9 @@ post <- run.jags(
     }
   }",
   monitor = c(
-    "deviance", "intercept", "pred.age", "group", 
-    "b.site", "b.group", "lo.meth", "obs.p.meth"
+    "deviance", "intercept", "pred.age",  
+    "b.prime", "w.site", "pr.site",
+    "p.min.meth", "lo.meth", "obs.p.meth"
   ), 
   data = model.data,
   inits = function() list(
@@ -210,17 +186,19 @@ end.time <- Sys.time()
 post$timetaken <- swfscMisc::autoUnits(post$timetaken)
 
 p <- myFuncs::runjags2list(post)
-dimnames(p$group)[[1]] <- list(sites.to.keep)
-dimnames(p$b.site)[[1]] <- list(sites.to.keep)
-dimnames(p$pred.age)[[1]] <- list(ages$swfsc.id)
-dimnames(p$p.meth)[1:2] <- list(ages$swfsc.id, sites.to.keep)
+dimnames(p$pred.age)[1] <- list(ages$swfsc.id)
+dimnames(p$b.prime)[1] <- list(sites.to.keep)
+dimnames(p$w.site)[1] <- list(sites.to.keep)
+dimnames(p$pr.site)[1] <- list(sites.to.keep)
+dimnames(p$p.min.meth)[1:2] <- list(ages$swfsc.id, sites.to.keep)
+dimnames(p$lo.meth)[1:2] <- list(ages$swfsc.id, sites.to.keep)
 dimnames(p$obs.p.meth)[1:2] <- list(ages$swfsc.id, sites.to.keep)
 
 save.image(format(end.time, "%y%m%d_%H%M.posterior.rdata"))
   
 plot(
   post, 
-  vars = c("deviance", "intercept", "pred.age", "group", "b.site"), 
+  vars = c("deviance", "intercept", "pred.age", "b.prime"), 
   plot.type = c("trace", "histogram"),
   file = format(end.time, "%y%m%d_%H%M.plots.pdf")
 )

@@ -7,37 +7,28 @@ load("results/221229_0535.posterior.rdata")
 
 p <- myFuncs::runjags2list(post)
 
-dimnames(p$group)[[1]] <- sites.to.keep
-dimnames(p$b.site)[[1]] <- sites.to.keep
-dimnames(p$pred.age)[[1]] <- ages$swfsc.id
+dimnames(p$group)[[1]] <- list(sites.to.keep)
+dimnames(p$b.site)[[1]] <- list(sites.to.keep)
+dimnames(p$pred.age)[[1]] <- list(ages$swfsc.id)
 dimnames(p$p.meth)[1:2] <- list(ages$swfsc.id, sites.to.keep)
 dimnames(p$obs.p.meth)[1:2] <- list(ages$swfsc.id, sites.to.keep)
 
-by.locus <- lapply(
-  split(locus.map$loc.site, locus.map$locus), 
-  function(loc.site) t(p$group[rownames(p$group) %in% loc.site, ])
-)
 
-
-numSame <- function(mat) {
-  nc <- ncol(mat)
-  num.same <- matrix(nrow(mat), nrow = nc, ncol = nc)
-  for(i in combn(1:nc, 2, simplify = FALSE)) {
-    x <- sum(apply(mat[, i], 1, function(x) x[1] == x[2]))
-    num.same[i[1], i[2]] <- num.same[i[2], i[1]] <- x
+pctSameGroup <- function(mat, pct = TRUE) {
+  nr <- nrow(mat)
+  num.same <- matrix(ncol(mat), nrow = nr, ncol = nr)
+  for(i in combn(1:nr, 2, simplify = FALSE)) {
+    x <- apply(mat[i, ], 2, function(mat.pairs) mat.pairs[1] == mat.pairs[2])
+    num.same[i[1], i[2]] <- num.same[i[2], i[1]] <- sum(x)
   }
-  num.same / nrow(mat)
+  if(pct) num.same / ncol(mat) else num.same
 }
 
 
-x <- replicate(4, {
-  matrix(sample(1:6, 500, T), ncol = 10)
-}, simplify = FALSE)
-
-x2 <- lapply(x, numSame)
-
-x3 <- do.call(abind::abind, c(x2, list(along = 3)))
-
-x4 <- apply(x3, 1:2, mean)
-
-x4
+by.locus <- mclapply(
+  split(locus.map$loc.site, locus.map$locus), 
+  function(loc.site) {
+    pctSameGroup(p$group[rownames(p$group) %in% loc.site, ])
+  },
+  mc.cores = 14
+)
